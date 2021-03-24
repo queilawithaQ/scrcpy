@@ -5,13 +5,10 @@
 #include <inttypes.h>
 #include <libgen.h>
 #include <stdio.h>
-#include <SDL2/SDL_thread.h>
 #include <SDL2/SDL_timer.h>
 #include <SDL2/SDL_platform.h>
 
-#include "config.h"
-#include "command.h"
-#include "util/lock.h"
+#include "adb.h"
 #include "util/log.h"
 #include "util/net.h"
 #include "util/str_util.h"
@@ -34,7 +31,7 @@ get_server_path(void) {
 #ifdef __WINDOWS__
         char *server_path = utf8_from_wide_char(server_path_env);
 #else
-        char *server_path = SDL_strdup(server_path_env);
+        char *server_path = strdup(server_path_env);
 #endif
         if (!server_path) {
             LOGE("Could not allocate memory");
@@ -46,7 +43,7 @@ get_server_path(void) {
 
 #ifndef PORTABLE
     LOGD("Using server: " DEFAULT_SERVER_PATH);
-    char *server_path = SDL_strdup(DEFAULT_SERVER_PATH);
+    char *server_path = strdup(DEFAULT_SERVER_PATH);
     if (!server_path) {
         LOGE("Could not allocate memory");
         return NULL;
@@ -68,11 +65,11 @@ get_server_path(void) {
 
     // sizeof(SERVER_FILENAME) gives statically the size including the null byte
     size_t len = dirlen + 1 + sizeof(SERVER_FILENAME);
-    char *server_path = SDL_malloc(len);
+    char *server_path = malloc(len);
     if (!server_path) {
         LOGE("Could not alloc server path string, "
              "using " SERVER_FILENAME " from current directory");
-        SDL_free(executable_path);
+        free(executable_path);
         return SERVER_FILENAME;
     }
 
@@ -81,7 +78,7 @@ get_server_path(void) {
     memcpy(&server_path[dirlen + 1], SERVER_FILENAME, sizeof(SERVER_FILENAME));
     // the final null byte has been copied with SERVER_FILENAME
 
-    SDL_free(executable_path);
+    free(executable_path);
 
     LOGD("Using server (portable): %s", server_path);
     return server_path;
@@ -96,36 +93,36 @@ push_server(const char *serial) {
     }
     if (!is_regular_file(server_path)) {
         LOGE("'%s' does not exist or is not a regular file\n", server_path);
-        SDL_free(server_path);
+        free(server_path);
         return false;
     }
     process_t process = adb_push(serial, server_path, DEVICE_SERVER_PATH);
-    SDL_free(server_path);
-    return process_check_success(process, "adb push");
+    free(server_path);
+    return process_check_success(process, "adb push", true);
 }
 
 static bool
 enable_tunnel_reverse(const char *serial, uint16_t local_port) {
     process_t process = adb_reverse(serial, SOCKET_NAME, local_port);
-    return process_check_success(process, "adb reverse");
+    return process_check_success(process, "adb reverse", true);
 }
 
 static bool
 disable_tunnel_reverse(const char *serial) {
     process_t process = adb_reverse_remove(serial, SOCKET_NAME);
-    return process_check_success(process, "adb reverse --remove");
+    return process_check_success(process, "adb reverse --remove", true);
 }
 
 static bool
 enable_tunnel_forward(const char *serial, uint16_t local_port) {
     process_t process = adb_forward(serial, local_port, SOCKET_NAME);
-    return process_check_success(process, "adb forward");
+    return process_check_success(process, "adb forward", true);
 }
 
 static bool
 disable_tunnel_forward(const char *serial, uint16_t local_port) {
     process_t process = adb_forward_remove(serial, local_port);
-    return process_check_success(process, "adb forward --remove");
+    return process_check_success(process, "adb forward --remove", true);
 }
 
 static bool
@@ -258,12 +255,12 @@ execute_server(struct server *server, const struct server_params *params) {
     char bit_rate_string[11];
     char max_fps_string[6];
     char lock_video_orientation_string[5];
-    char display_id_string[6];
+    char display_id_string[11];
     sprintf(max_size_string, "%"PRIu16, params->max_size);
     sprintf(bit_rate_string, "%"PRIu32, params->bit_rate);
     sprintf(max_fps_string, "%"PRIu16, params->max_fps);
     sprintf(lock_video_orientation_string, "%"PRIi8, params->lock_video_orientation);
-    sprintf(display_id_string, "%"PRIu16, params->display_id);
+    sprintf(display_id_string, "%"PRIu32, params->display_id);
     const char *const cmd[] = {
         "shell",
         "CLASSPATH=" DEVICE_SERVER_PATH,
@@ -358,18 +355,17 @@ bool
 server_init(struct server *server) {
     server->serial = NULL;
     server->process = PROCESS_NONE;
-    server->wait_server_thread = NULL;
     atomic_flag_clear_explicit(&server->server_socket_closed,
                                memory_order_relaxed);
 
-    server->mutex = SDL_CreateMutex();
-    if (!server->mutex) {
+    bool ok = sc_mutex_init(&server->mutex);
+    if (!ok) {
         return false;
     }
 
-    server->process_terminated_cond = SDL_CreateCond();
-    if (!server->process_terminated_cond) {
-        SDL_DestroyMutex(server->mutex);
+    ok = sc_cond_init(&server->process_terminated_cond);
+    if (!ok) {
+        sc_mutex_destroy(&server->mutex);
         return false;
     }
 
@@ -379,8 +375,6 @@ server_init(struct server *server) {
     server->video_socket = INVALID_SOCKET;
     server->control_socket = INVALID_SOCKET;
 
-    server->port_range.first = 0;
-    server->port_range.last = 0;
     server->local_port = 0;
 
     server->tunnel_enabled = false;
@@ -392,12 +386,12 @@ server_init(struct server *server) {
 static int
 run_wait_server(void *data) {
     struct server *server = data;
-    cmd_simple_wait(server->process, NULL); // ignore exit code
+    process_wait(server->process, false); // ignore exit code
 
-    mutex_lock(server->mutex);
+    sc_mutex_lock(&server->mutex);
     server->process_terminated = true;
-    cond_signal(server->process_terminated_cond);
-    mutex_unlock(server->mutex);
+    sc_cond_signal(&server->process_terminated_cond);
+    sc_mutex_unlock(&server->mutex);
 
     // no need for synchronization, server_socket is initialized before this
     // thread was created
@@ -414,10 +408,8 @@ run_wait_server(void *data) {
 bool
 server_start(struct server *server, const char *serial,
              const struct server_params *params) {
-    server->port_range = params->port_range;
-
     if (serial) {
-        server->serial = SDL_strdup(serial);
+        server->serial = strdup(serial);
         if (!server->serial) {
             return false;
         }
@@ -444,11 +436,11 @@ server_start(struct server *server, const char *serial,
     // things simple and multiplatform, just spawn a new thread waiting for the
     // server process and calling shutdown()/close() on the server socket if
     // necessary to wake up any accept() blocking call.
-    server->wait_server_thread =
-        SDL_CreateThread(run_wait_server, "wait-server", server);
-    if (!server->wait_server_thread) {
-        cmd_terminate(server->process);
-        cmd_simple_wait(server->process, NULL); // ignore exit code
+    bool ok = sc_thread_create(&server->wait_server_thread, run_wait_server,
+                               "wait-server", server);
+    if (!ok) {
+        process_terminate(server->process);
+        process_wait(server->process, true); // ignore exit code
         goto error2;
     }
 
@@ -467,7 +459,7 @@ error2:
     }
     disable_tunnel(server);
 error1:
-    SDL_free(server->serial);
+    free(server->serial);
     return false;
 }
 
@@ -536,33 +528,33 @@ server_stop(struct server *server) {
     }
 
     // Give some delay for the server to terminate properly
-    mutex_lock(server->mutex);
-    int r = 0;
+    sc_mutex_lock(&server->mutex);
+    bool signaled = false;
     if (!server->process_terminated) {
 #define WATCHDOG_DELAY_MS 1000
-        r = cond_wait_timeout(server->process_terminated_cond,
-                              server->mutex,
-                              WATCHDOG_DELAY_MS);
+        signaled = sc_cond_timedwait(&server->process_terminated_cond,
+                                     &server->mutex,
+                                     WATCHDOG_DELAY_MS);
     }
-    mutex_unlock(server->mutex);
+    sc_mutex_unlock(&server->mutex);
 
     // After this delay, kill the server if it's not dead already.
     // On some devices, closing the sockets is not sufficient to wake up the
     // blocking calls while the device is asleep.
-    if (r == SDL_MUTEX_TIMEDOUT) {
-        // FIXME There is a race condition here: there is a small chance that
-        // the process is already terminated, and the PID assigned to a new
-        // process.
+    if (!signaled) {
+        // The process is terminated, but not reaped (closed) yet, so its PID
+        // is still valid.
         LOGW("Killing the server...");
-        cmd_terminate(server->process);
+        process_terminate(server->process);
     }
 
-    SDL_WaitThread(server->wait_server_thread, NULL);
+    sc_thread_join(&server->wait_server_thread, NULL);
+    process_close(server->process);
 }
 
 void
 server_destroy(struct server *server) {
-    SDL_free(server->serial);
-    SDL_DestroyCond(server->process_terminated_cond);
-    SDL_DestroyMutex(server->mutex);
+    free(server->serial);
+    sc_cond_destroy(&server->process_terminated_cond);
+    sc_mutex_destroy(&server->mutex);
 }

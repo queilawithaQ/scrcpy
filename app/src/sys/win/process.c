@@ -1,8 +1,8 @@
-#include "command.h"
+#include "util/process.h"
 
+#include <assert.h>
 #include <sys/stat.h>
 
-#include "config.h"
 #include "util/log.h"
 #include "util/str_util.h"
 
@@ -21,7 +21,7 @@ build_cmd(char *cmd, size_t len, const char *const argv[]) {
 }
 
 enum process_result
-cmd_execute(const char *const argv[], HANDLE *handle) {
+process_execute(const char *const argv[], HANDLE *handle) {
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
     memset(&si, 0, sizeof(si));
@@ -41,7 +41,7 @@ cmd_execute(const char *const argv[], HANDLE *handle) {
 
     if (!CreateProcessW(NULL, wide, NULL, NULL, FALSE, 0, NULL, NULL, &si,
                         &pi)) {
-        SDL_free(wide);
+        free(wide);
         *handle = NULL;
         if (GetLastError() == ERROR_FILE_NOT_FOUND) {
             return PROCESS_ERROR_MISSING_BINARY;
@@ -49,29 +49,35 @@ cmd_execute(const char *const argv[], HANDLE *handle) {
         return PROCESS_ERROR_GENERIC;
     }
 
-    SDL_free(wide);
+    free(wide);
     *handle = pi.hProcess;
     return PROCESS_SUCCESS;
 }
 
 bool
-cmd_terminate(HANDLE handle) {
+process_terminate(HANDLE handle) {
     return TerminateProcess(handle, 1);
 }
 
-bool
-cmd_simple_wait(HANDLE handle, DWORD *exit_code) {
+exit_code_t
+process_wait(HANDLE handle, bool close) {
     DWORD code;
     if (WaitForSingleObject(handle, INFINITE) != WAIT_OBJECT_0
             || !GetExitCodeProcess(handle, &code)) {
         // could not wait or retrieve the exit code
-        code = -1; // max value, it's unsigned
+        code = NO_EXIT_CODE; // max value, it's unsigned
     }
-    if (exit_code) {
-        *exit_code = code;
+    if (close) {
+        CloseHandle(handle);
     }
-    CloseHandle(handle);
-    return !code;
+    return code;
+}
+
+void
+process_close(HANDLE handle) {
+    bool closed = CloseHandle(handle);
+    assert(closed);
+    (void) closed;
 }
 
 char *
@@ -99,7 +105,7 @@ is_regular_file(const char *path) {
 
     struct _stat path_stat;
     int r = _wstat(wide_path, &path_stat);
-    SDL_free(wide_path);
+    free(wide_path);
 
     if (r) {
         perror("stat");

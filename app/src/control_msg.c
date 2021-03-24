@@ -1,9 +1,9 @@
 #include "control_msg.h"
 
 #include <assert.h>
+#include <stdlib.h>
 #include <string.h>
 
-#include "config.h"
 #include "util/buffer_util.h"
 #include "util/log.h"
 #include "util/str_util.h"
@@ -94,10 +94,10 @@ void
 control_msg_destroy(struct control_msg *msg) {
     switch (msg->type) {
         case CONTROL_MSG_TYPE_INJECT_TEXT:
-            SDL_free(msg->inject_text.text);
+            free(msg->inject_text.text);
             break;
         case CONTROL_MSG_TYPE_SET_CLIPBOARD:
-            SDL_free(msg->set_clipboard.text);
+            free(msg->set_clipboard.text);
             break;
         default:
             // do nothing

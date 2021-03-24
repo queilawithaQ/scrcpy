@@ -1,8 +1,9 @@
+#include "common.h"
+
 #include <assert.h>
 #include <string.h>
 
 #include "cli.h"
-#include "common.h"
 #include "scrcpy.h"
 
 static void test_flag_version(void) {

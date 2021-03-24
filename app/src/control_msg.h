@@ -1,14 +1,15 @@
 #ifndef CONTROLMSG_H
 #define CONTROLMSG_H
 
+#include "common.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-#include "config.h"
 #include "android/input.h"
 #include "android/keycodes.h"
-#include "common.h"
+#include "coords.h"
 
 #define CONTROL_MSG_MAX_SIZE (1 << 18) // 256k
 
@@ -49,7 +50,7 @@ struct control_msg {
             enum android_metastate metastate;
         } inject_keycode;
         struct {
-            char *text; // owned, to be freed by SDL_free()
+            char *text; // owned, to be freed by free()
         } inject_text;
         struct {
             enum android_motionevent_action action;
@@ -64,7 +65,7 @@ struct control_msg {
             int32_t vscroll;
         } inject_scroll_event;
         struct {
-            char *text; // owned, to be freed by SDL_free()
+            char *text; // owned, to be freed by free()
             bool paste;
         } set_clipboard;
         struct {

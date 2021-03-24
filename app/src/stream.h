@@ -1,20 +1,21 @@
 #ifndef STREAM_H
 #define STREAM_H
 
+#include "common.h"
+
 #include <stdbool.h>
 #include <stdint.h>
 #include <libavformat/avformat.h>
 #include <SDL2/SDL_atomic.h>
-#include <SDL2/SDL_thread.h>
 
-#include "config.h"
 #include "util/net.h"
+#include "util/thread.h"
 
 struct video_buffer;
 
 struct stream {
     socket_t socket;
-    SDL_Thread *thread;
+    sc_thread thread;
     struct decoder *decoder;
     struct recorder *recorder;
     AVCodecContext *codec_ctx;

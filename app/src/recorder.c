@@ -3,9 +3,6 @@
 #include <assert.h>
 #include <libavutil/time.h>
 
-#include "config.h"
-#include "compat.h"
-#include "util/lock.h"
 #include "util/log.h"
 
 static const AVRational SCRCPY_TIME_BASE = {1, 1000000}; // timestamps in us
@@ -29,7 +26,7 @@ find_muxer(const char *name) {
 
 static struct record_packet *
 record_packet_new(const AVPacket *packet) {
-    struct record_packet *rec = SDL_malloc(sizeof(*rec));
+    struct record_packet *rec = malloc(sizeof(*rec));
     if (!rec) {
         return NULL;
     }
@@ -39,7 +36,7 @@ record_packet_new(const AVPacket *packet) {
     av_init_packet(&rec->packet);
 
     if (av_packet_ref(&rec->packet, packet)) {
-        SDL_free(rec);
+        free(rec);
         return NULL;
     }
     return rec;
@@ -48,7 +45,7 @@ record_packet_new(const AVPacket *packet) {
 static void
 record_packet_delete(struct record_packet *rec) {
     av_packet_unref(&rec->packet);
-    SDL_free(rec);
+    free(rec);
 }
 
 static void
@@ -65,24 +62,24 @@ recorder_init(struct recorder *recorder,
               const char *filename,
               enum sc_record_format format,
               struct size declared_frame_size) {
-    recorder->filename = SDL_strdup(filename);
+    recorder->filename = strdup(filename);
     if (!recorder->filename) {
         LOGE("Could not strdup filename");
         return false;
     }
 
-    recorder->mutex = SDL_CreateMutex();
-    if (!recorder->mutex) {
+    bool ok = sc_mutex_init(&recorder->mutex);
+    if (!ok) {
         LOGC("Could not create mutex");
-        SDL_free(recorder->filename);
+        free(recorder->filename);
         return false;
     }
 
-    recorder->queue_cond = SDL_CreateCond();
-    if (!recorder->queue_cond) {
+    ok = sc_cond_init(&recorder->queue_cond);
+    if (!ok) {
         LOGC("Could not create cond");
-        SDL_DestroyMutex(recorder->mutex);
-        SDL_free(recorder->filename);
+        sc_mutex_destroy(&recorder->mutex);
+        free(recorder->filename);
         return false;
     }
 
@@ -99,9 +96,9 @@ recorder_init(struct recorder *recorder,
 
 void
 recorder_destroy(struct recorder *recorder) {
-    SDL_DestroyCond(recorder->queue_cond);
-    SDL_DestroyMutex(recorder->mutex);
-    SDL_free(recorder->filename);
+    sc_cond_destroy(&recorder->queue_cond);
+    sc_mutex_destroy(&recorder->mutex);
+    free(recorder->filename);
 }
 
 static const char *
@@ -260,17 +257,17 @@ run_recorder(void *data) {
     struct recorder *recorder = data;
 
     for (;;) {
-        mutex_lock(recorder->mutex);
+        sc_mutex_lock(&recorder->mutex);
 
         while (!recorder->stopped && queue_is_empty(&recorder->queue)) {
-            cond_wait(recorder->queue_cond, recorder->mutex);
+            sc_cond_wait(&recorder->queue_cond, &recorder->mutex);
         }
 
         // if stopped is set, continue to process the remaining events (to
         // finish the recording) before actually stopping
 
         if (recorder->stopped && queue_is_empty(&recorder->queue)) {
-            mutex_unlock(recorder->mutex);
+            sc_mutex_unlock(&recorder->mutex);
             struct record_packet *last = recorder->previous;
             if (last) {
                 // assign an arbitrary duration to the last packet
@@ -290,7 +287,7 @@ run_recorder(void *data) {
         struct record_packet *rec;
         queue_take(&recorder->queue, next, &rec);
 
-        mutex_unlock(recorder->mutex);
+        sc_mutex_unlock(&recorder->mutex);
 
         // recorder->previous is only written from this thread, no need to lock
         struct record_packet *previous = recorder->previous;
@@ -313,11 +310,11 @@ run_recorder(void *data) {
         if (!ok) {
             LOGE("Could not record packet");
 
-            mutex_lock(recorder->mutex);
+            sc_mutex_lock(&recorder->mutex);
             recorder->failed = true;
             // discard pending packets
             recorder_queue_clear(&recorder->queue);
-            mutex_unlock(recorder->mutex);
+            sc_mutex_unlock(&recorder->mutex);
             break;
         }
 
@@ -332,8 +329,9 @@ bool
 recorder_start(struct recorder *recorder) {
     LOGD("Starting recorder thread");
 
-    recorder->thread = SDL_CreateThread(run_recorder, "recorder", recorder);
-    if (!recorder->thread) {
+    bool ok = sc_thread_create(&recorder->thread, run_recorder, "recorder",
+                               recorder);
+    if (!ok) {
         LOGC("Could not start recorder thread");
         return false;
     }
@@ -343,38 +341,38 @@ recorder_start(struct recorder *recorder) {
 
 void
 recorder_stop(struct recorder *recorder) {
-    mutex_lock(recorder->mutex);
+    sc_mutex_lock(&recorder->mutex);
     recorder->stopped = true;
-    cond_signal(recorder->queue_cond);
-    mutex_unlock(recorder->mutex);
+    sc_cond_signal(&recorder->queue_cond);
+    sc_mutex_unlock(&recorder->mutex);
 }
 
 void
 recorder_join(struct recorder *recorder) {
-    SDL_WaitThread(recorder->thread, NULL);
+    sc_thread_join(&recorder->thread, NULL);
 }
 
 bool
 recorder_push(struct recorder *recorder, const AVPacket *packet) {
-    mutex_lock(recorder->mutex);
+    sc_mutex_lock(&recorder->mutex);
     assert(!recorder->stopped);
 
     if (recorder->failed) {
         // reject any new packet (this will stop the stream)
-        mutex_unlock(recorder->mutex);
+        sc_mutex_unlock(&recorder->mutex);
         return false;
     }
 
     struct record_packet *rec = record_packet_new(packet);
     if (!rec) {
         LOGC("Could not allocate record packet");
-        mutex_unlock(recorder->mutex);
+        sc_mutex_unlock(&recorder->mutex);
         return false;
     }
 
     queue_push(&recorder->queue, next, rec);
-    cond_signal(recorder->queue_cond);
+    sc_cond_signal(&recorder->queue_cond);
 
-    mutex_unlock(recorder->mutex);
+    sc_mutex_unlock(&recorder->mutex);
     return true;
 }

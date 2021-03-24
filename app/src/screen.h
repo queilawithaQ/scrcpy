@@ -1,21 +1,22 @@
 #ifndef SCREEN_H
 #define SCREEN_H
 
+#include "common.h"
+
 #include <stdbool.h>
 #include <SDL2/SDL.h>
 #include <libavformat/avformat.h>
 
-#include "config.h"
-#include "common.h"
+#include "coords.h"
 #include "opengl.h"
 
 struct video_buffer;
 
 struct screen {
+    struct video_buffer *vb;
     SDL_Window *window;
     SDL_Renderer *renderer;
     SDL_Texture *texture;
-    bool use_opengl;
     struct sc_opengl gl;
     struct size frame_size;
     struct size content_size; // rotated frame_size
@@ -37,10 +38,10 @@ struct screen {
 };
 
 #define SCREEN_INITIALIZER { \
+    .vb = NULL, \
     .window = NULL, \
     .renderer = NULL, \
     .texture = NULL, \
-    .use_opengl = false, \
     .gl = {0}, \
     .frame_size = { \
         .width = 0, \
@@ -71,7 +72,7 @@ struct screen {
 
 // initialize default values
 void
-screen_init(struct screen *screen);
+screen_init(struct screen *screen, struct video_buffer *vb);
 
 // initialize screen, create window, renderer and texture (window is hidden)
 // window_x and window_y accept SC_WINDOW_POSITION_UNDEFINED
@@ -89,10 +90,6 @@ screen_show_window(struct screen *screen);
 // destroy window, renderer and texture (if any)
 void
 screen_destroy(struct screen *screen);
-
-// resize if necessary and write the rendered frame into the texture
-bool
-screen_update_frame(struct screen *screen, struct video_buffer *vb);
 
 // render the texture to the renderer
 //
@@ -117,9 +114,9 @@ screen_resize_to_pixel_perfect(struct screen *screen);
 void
 screen_set_rotation(struct screen *screen, unsigned rotation);
 
-// react to window events
-void
-screen_handle_window_event(struct screen *screen, const SDL_WindowEvent *event);
+// react to SDL events
+bool
+screen_handle_event(struct screen *screen, SDL_Event *event);
 
 // convert point from window coordinates to frame coordinates
 // x and y are expressed in pixels

@@ -13,10 +13,6 @@
 # include <windows.h>
 #endif
 
-#include "config.h"
-#include "command.h"
-#include "common.h"
-#include "compat.h"
 #include "controller.h"
 #include "decoder.h"
 #include "device.h"
@@ -30,12 +26,11 @@
 #include "stream.h"
 #include "tiny_xpm.h"
 #include "video_buffer.h"
-#include "util/lock.h"
 #include "util/log.h"
 #include "util/net.h"
 
 static struct server server;
-static struct screen screen = SCREEN_INITIALIZER;
+static struct screen screen;
 static struct fps_counter fps_counter;
 static struct video_buffer video_buffer;
 static struct stream stream;
@@ -178,68 +173,37 @@ handle_event(SDL_Event *event, const struct scrcpy_options *options) {
         case SDL_QUIT:
             LOGD("User requested to quit");
             return EVENT_RESULT_STOPPED_BY_USER;
-        case EVENT_NEW_FRAME:
-            if (!screen.has_frame) {
-                screen.has_frame = true;
-                // this is the very first frame, show the window
-                screen_show_window(&screen);
-            }
-            if (!screen_update_frame(&screen, &video_buffer)) {
-                return EVENT_RESULT_CONTINUE;
-            }
-            break;
-        case SDL_WINDOWEVENT:
-            screen_handle_window_event(&screen, &event->window);
-            break;
-        case SDL_TEXTINPUT:
-            if (!options->control) {
-                break;
-            }
-            input_manager_process_text_input(&input_manager, &event->text);
-            break;
-        case SDL_KEYDOWN:
-        case SDL_KEYUP:
-            // some key events do not interact with the device, so process the
-            // event even if control is disabled
-            input_manager_process_key(&input_manager, &event->key);
-            break;
-        case SDL_MOUSEMOTION:
-            if (!options->control) {
-                break;
-            }
-            input_manager_process_mouse_motion(&input_manager, &event->motion);
-            break;
-        case SDL_MOUSEWHEEL:
-            if (!options->control) {
-                break;
-            }
-            input_manager_process_mouse_wheel(&input_manager, &event->wheel);
-            break;
-        case SDL_MOUSEBUTTONDOWN:
-        case SDL_MOUSEBUTTONUP:
-            // some mouse events do not interact with the device, so process
-            // the event even if control is disabled
-            input_manager_process_mouse_button(&input_manager, &event->button);
-            break;
-        case SDL_FINGERMOTION:
-        case SDL_FINGERDOWN:
-        case SDL_FINGERUP:
-            input_manager_process_touch(&input_manager, &event->tfinger);
-            break;
         case SDL_DROPFILE: {
             if (!options->control) {
                 break;
             }
+            char *file = strdup(event->drop.file);
+            SDL_free(event->drop.file);
+            if (!file) {
+                LOGW("Could not strdup drop filename\n");
+                break;
+            }
+
             file_handler_action_t action;
-            if (is_apk(event->drop.file)) {
+            if (is_apk(file)) {
                 action = ACTION_INSTALL_APK;
             } else {
                 action = ACTION_PUSH_FILE;
             }
-            file_handler_request(&file_handler, action, event->drop.file);
+            file_handler_request(&file_handler, action, file);
             break;
         }
     }
+
+    bool consumed = screen_handle_event(&screen, event);
+    if (consumed) {
+        goto end;
+    }
+
+    consumed = input_manager_handle_event(&input_manager, event);
+    (void) consumed;
+
+end:
     return EVENT_RESULT_CONTINUE;
 }
 
@@ -290,7 +254,7 @@ av_log_callback(void *avcl, int level, const char *fmt, va_list vl) {
     if (priority == 0) {
         return;
     }
-    char *local_fmt = SDL_malloc(strlen(fmt) + 10);
+    char *local_fmt = malloc(strlen(fmt) + 10);
     if (!local_fmt) {
         LOGC("Could not allocate string");
         return;
@@ -299,7 +263,7 @@ av_log_callback(void *avcl, int level, const char *fmt, va_list vl) {
     strcpy(local_fmt, "[FFmpeg] ");
     strcpy(local_fmt + 9, fmt);
     SDL_LogMessageV(SDL_LOG_CATEGORY_VIDEO, priority, local_fmt, vl);
-    SDL_free(local_fmt);
+    free(local_fmt);
 }
 
 bool
@@ -424,6 +388,8 @@ scrcpy(const struct scrcpy_options *options) {
 
         const char *window_title =
             options->window_title ? options->window_title : device_name;
+
+        screen_init(&screen, &video_buffer);
 
         if (!screen_init_rendering(&screen, window_title, frame_size,
                                    options->always_on_top, options->window_x,

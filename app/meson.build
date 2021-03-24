@@ -1,7 +1,8 @@
 src = [
     'src/main.c',
+    'src/adb.c',
     'src/cli.c',
-    'src/command.c',
+    'src/compat.c',
     'src/control_msg.c',
     'src/controller.c',
     'src/decoder.c',
@@ -21,8 +22,22 @@ src = [
     'src/tiny_xpm.c',
     'src/video_buffer.c',
     'src/util/net.c',
-    'src/util/str_util.c'
+    'src/util/process.c',
+    'src/util/str_util.c',
+    'src/util/thread.c',
 ]
+
+if host_machine.system() == 'windows'
+    src += [ 'src/sys/win/process.c' ]
+else
+    src += [ 'src/sys/unix/process.c' ]
+endif
+
+check_functions = [
+    'strdup'
+]
+
+cc = meson.get_compiler('c')
 
 if not get_option('crossbuild_windows')
 
@@ -37,8 +52,6 @@ if not get_option('crossbuild_windows')
 else
 
     # cross-compile mingw32 build (from Linux to Windows)
-    cc = meson.get_compiler('c')
-
     prebuilt_sdl2 = meson.get_cross_property('prebuilt_sdl2')
     sdl2_bin_dir = meson.current_source_dir() + '/../prebuilt-deps/' + prebuilt_sdl2 + '/bin'
     sdl2_lib_dir = meson.current_source_dir() + '/../prebuilt-deps/' + prebuilt_sdl2 + '/lib'
@@ -73,19 +86,18 @@ else
 
 endif
 
-cc = meson.get_compiler('c')
-
 if host_machine.system() == 'windows'
-    src += [ 'src/sys/win/command.c' ]
     dependencies += cc.find_library('ws2_32')
-else
-    src += [ 'src/sys/unix/command.c' ]
 endif
 
 conf = configuration_data()
 
-# expose the build type
-conf.set('NDEBUG', get_option('buildtype') != 'debug')
+foreach f : check_functions
+  if cc.has_function(f)
+    define = 'HAVE_' + f.underscorify().to_upper()
+    conf.set(define, true)
+  endif
+endforeach
 
 # the version, updated on release
 conf.set_quoted('SCRCPY_VERSION', meson.project_version())

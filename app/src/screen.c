@@ -4,14 +4,11 @@
 #include <string.h>
 #include <SDL2/SDL.h>
 
-#include "config.h"
-#include "common.h"
-#include "compat.h"
+#include "events.h"
 #include "icon.xpm"
 #include "scrcpy.h"
 #include "tiny_xpm.h"
 #include "video_buffer.h"
-#include "util/lock.h"
 #include "util/log.h"
 
 #define DISPLAY_MARGINS 96
@@ -195,8 +192,9 @@ screen_update_content_rect(struct screen *screen) {
 }
 
 void
-screen_init(struct screen *screen) {
+screen_init(struct screen *screen, struct video_buffer *vb) {
     *screen = (struct screen) SCREEN_INITIALIZER;
+    screen->vb = vb;
 }
 
 static inline SDL_Texture *
@@ -274,7 +272,7 @@ screen_init_rendering(struct screen *screen, const char *window_title,
                                           SDL_RENDERER_ACCELERATED);
     if (!screen->renderer) {
         LOGC("Could not create renderer: %s", SDL_GetError());
-        screen_destroy(screen);
+        SDL_DestroyWindow(screen->window);
         return false;
     }
 
@@ -284,8 +282,8 @@ screen_init_rendering(struct screen *screen, const char *window_title,
     LOGI("Renderer: %s", renderer_name ? renderer_name : "(unknown)");
 
     // starts with "opengl"
-    screen->use_opengl = renderer_name && !strncmp(renderer_name, "opengl", 6);
-    if (screen->use_opengl) {
+    bool use_opengl = renderer_name && !strncmp(renderer_name, "opengl", 6);
+    if (use_opengl) {
         struct sc_opengl *gl = &screen->gl;
         sc_opengl_init(gl);
 
@@ -305,7 +303,7 @@ screen_init_rendering(struct screen *screen, const char *window_title,
         } else {
             LOGI("Trilinear filtering disabled");
         }
-    } else {
+    } else if (mipmaps) {
         LOGD("Trilinear filtering disabled (not an OpenGL renderer)");
     }
 
@@ -322,6 +320,8 @@ screen_init_rendering(struct screen *screen, const char *window_title,
     screen->texture = create_texture(screen);
     if (!screen->texture) {
         LOGC("Could not create texture: %s", SDL_GetError());
+        SDL_DestroyRenderer(screen->renderer);
+        SDL_DestroyWindow(screen->window);
         screen_destroy(screen);
         return false;
     }
@@ -346,12 +346,8 @@ screen_destroy(struct screen *screen) {
     if (screen->texture) {
         SDL_DestroyTexture(screen->texture);
     }
-    if (screen->renderer) {
-        SDL_DestroyRenderer(screen->renderer);
-    }
-    if (screen->window) {
-        SDL_DestroyWindow(screen->window);
-    }
+    SDL_DestroyRenderer(screen->renderer);
+    SDL_DestroyWindow(screen->window);
 }
 
 static void
@@ -448,24 +444,20 @@ update_texture(struct screen *screen, const AVFrame *frame) {
             frame->data[2], frame->linesize[2]);
 
     if (screen->mipmaps) {
-        assert(screen->use_opengl);
         SDL_GL_BindTexture(screen->texture, NULL, NULL);
         screen->gl.GenerateMipmap(GL_TEXTURE_2D);
         SDL_GL_UnbindTexture(screen->texture);
     }
 }
 
-bool
-screen_update_frame(struct screen *screen, struct video_buffer *vb) {
-    mutex_lock(vb->mutex);
-    const AVFrame *frame = video_buffer_consume_rendered_frame(vb);
+static bool
+screen_update_frame(struct screen *screen) {
+    const AVFrame *frame = video_buffer_take_rendering_frame(screen->vb);
     struct size new_frame_size = {frame->width, frame->height};
     if (!prepare_for_frame(screen, new_frame_size)) {
-        mutex_unlock(vb->mutex);
         return false;
     }
     update_texture(screen, frame);
-    mutex_unlock(vb->mutex);
 
     screen_render(screen, false);
     return true;
@@ -552,31 +544,52 @@ screen_resize_to_pixel_perfect(struct screen *screen) {
                                             content_size.height);
 }
 
-void
-screen_handle_window_event(struct screen *screen,
-                           const SDL_WindowEvent *event) {
-    switch (event->event) {
-        case SDL_WINDOWEVENT_EXPOSED:
-            screen_render(screen, true);
-            break;
-        case SDL_WINDOWEVENT_SIZE_CHANGED:
-            screen_render(screen, true);
-            break;
-        case SDL_WINDOWEVENT_MAXIMIZED:
-            screen->maximized = true;
-            break;
-        case SDL_WINDOWEVENT_RESTORED:
-            if (screen->fullscreen) {
-                // On Windows, in maximized+fullscreen, disabling fullscreen
-                // mode unexpectedly triggers the "restored" then "maximized"
-                // events, leaving the window in a weird state (maximized
-                // according to the events, but not maximized visually).
-                break;
+bool
+screen_handle_event(struct screen *screen, SDL_Event *event) {
+    switch (event->type) {
+        case EVENT_NEW_FRAME:
+            if (!screen->has_frame) {
+                screen->has_frame = true;
+                // this is the very first frame, show the window
+                screen_show_window(screen);
             }
-            screen->maximized = false;
-            apply_pending_resize(screen);
-            break;
+            bool ok = screen_update_frame(screen);
+            if (!ok) {
+                LOGW("Frame update failed\n");
+            }
+            return true;
+        case SDL_WINDOWEVENT:
+            if (!screen->has_frame) {
+                // Do nothing
+                return true;
+            }
+            switch (event->window.event) {
+                case SDL_WINDOWEVENT_EXPOSED:
+                    screen_render(screen, true);
+                    break;
+                case SDL_WINDOWEVENT_SIZE_CHANGED:
+                    screen_render(screen, true);
+                    break;
+                case SDL_WINDOWEVENT_MAXIMIZED:
+                    screen->maximized = true;
+                    break;
+                case SDL_WINDOWEVENT_RESTORED:
+                    if (screen->fullscreen) {
+                        // On Windows, in maximized+fullscreen, disabling
+                        // fullscreen mode unexpectedly triggers the "restored"
+                        // then "maximized" events, leaving the window in a
+                        // weird state (maximized according to the events, but
+                        // not maximized visually).
+                        break;
+                    }
+                    screen->maximized = false;
+                    apply_pending_resize(screen);
+                    break;
+            }
+            return true;
     }
+
+    return false;
 }
 
 struct point
